@@ -11,12 +11,6 @@ A Rust trading bot for [Polymarket](https://polymarket.com) that trades 15-minut
 
 ---
 
-**Watch the bot in action:**
-
-[![Polymarket Trading Bot Demo](https://img.youtube.com/vi/1nF556ypGXM/0.jpg)](https://youtu.be/1nF556ypGXM?si=3d4zmY6lKVj4fVhO)
-
----
-
 ## Quick reference
 
 | Binary | Description |
@@ -147,9 +141,3 @@ cargo run --bin test_redeem -- --list
 - Do **not** commit `config.json` with real keys or secrets.
 - Prefer simulation and small sizes when testing.
 - Monitor logs and balances when running in production.
-
-## Support
-
-If you have any questions or would like a more customized app for specific use cases, please feel free to contact us at the contact information below.
-- E-Mail: admin@hyperbuildx.com
-- Telegram: [@bettyjk_0915](https://t.me/bettyjk_0915)
