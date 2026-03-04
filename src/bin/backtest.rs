@@ -1,7 +1,7 @@
 // Backtest binary: simulate trading strategies using historical price data
 
-use polymarket_arbitrage_bot::backtest::run_backtest;
-use polymarket_arbitrage_bot::config::{Args, Config};
+use polymarket_trading_bot::backtest::run_backtest;
+use polymarket_trading_bot::config::{Args, Config};
 use clap::Parser;
 use anyhow::Result;
 

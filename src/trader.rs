@@ -1,5 +1,6 @@
 use crate::api::PolymarketApi;
 use crate::models::*;
+use std::convert::TryFrom;
 use crate::detector::{BuyOpportunity, TokenType, PriceDetector};
 use crate::config::TradingConfig;
 use crate::monitor::MarketSnapshot;
@@ -24,6 +25,10 @@ pub struct Trader {
 }
 
 impl Trader {
+    pub fn is_simulation(&self) -> bool {
+        self.simulation_mode
+    }
+
     pub fn get_simulation_tracker(&self) -> Option<Arc<SimulationTracker>> {
         self.simulation_tracker.clone()
     }
@@ -47,8 +52,8 @@ impl Trader {
         })
     }
 
-    /// Helper function to place hedge sell orders with retry logic
-    /// This is called from a background task after waiting 7 seconds
+    /// Place hedge sell orders: standard hedge = 5 orders (4 at $0.93, 1 at $0.98); early/individual = 1 order at $0.98.
+    /// Called from a background task after waiting 7 seconds.
     async fn place_hedge_sell_orders_with_retry(
         api: &PolymarketApi,
         pending_trades: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, PendingTrade>>>,
@@ -63,125 +68,114 @@ impl Trader {
         const RETRY_DELAY_SECS: u64 = 2;
         
         let hedge_type = if is_standard_hedge { "STANDARD HEDGE" } else { "INDIVIDUAL HEDGE" };
-        
-        crate::log_println!("═══════════════════════════════════════════════════════════");
-        crate::log_println!("📤 PLACING 2 LIMIT SELL ORDERS FOR {}", hedge_type);
-        crate::log_println!("═══════════════════════════════════════════════════════════");
-        crate::log_println!("📊 Order Details:");
-        crate::log_println!("   Token: {}", token_type.display_name());
-        crate::log_println!("   Token ID: {}", token_id);
-        crate::log_println!("   Order 1: ${:.2} at $0.93, Size: {:.6} shares", sell_size * 0.93, sell_size);
-        crate::log_println!("   Order 2: ${:.2} at $0.98, Size: {:.6} shares", sell_size * 0.98, sell_size);
-        crate::log_println!("");
-        
         use crate::models::OrderRequest;
         
-        // Place first order at $0.93 with retry
-        let mut order1_placed = false;
-        for attempt in 1..=MAX_RETRIES {
-            let sell_order_1 = OrderRequest {
-                token_id: token_id.to_string(),
-                side: "SELL".to_string(),
-                size: format!("{:.2}", sell_size),
-                price: format!("{:.2}", 0.93),
-                order_type: "LIMIT".to_string(),
-            };
+        if is_standard_hedge {
+            // Standard hedge (price crossed after dual_limit_hedge_after_minutes): 5 orders = 4 at $0.93, 1 at $0.98
+            let fifth = sell_size / 5.0;
+            let sizes: [f64; 5] = [fifth, fifth, fifth, fifth, sell_size - 4.0 * fifth];
+            let prices: [f64; 5] = [0.93, 0.93, 0.93, 0.93, 0.98];
             
-            match api.place_order(&sell_order_1).await {
-                Ok(response) => {
-                    crate::log_println!("   ✅ LIMIT SELL ORDER 1 PLACED FOR {} (attempt {})", hedge_type, attempt);
-                    crate::log_println!("      Token: {}", token_type.display_name());
-                    crate::log_println!("      Order ID: {:?}", response.order_id);
-                    crate::log_println!("      Limit Price: $0.93");
-                    crate::log_println!("      Size: {:.6} shares", sell_size);
-                    
-                    let order_id_str = response.order_id.as_ref()
-                        .map(|id| format!("{:?}", id))
-                        .unwrap_or_else(|| "N/A".to_string());
-                    let sell_event = format!(
-                        "LIMIT SELL ORDER ({}) | Market: {} | Period: {} | Token: {} | Limit Price: $0.93 | Size: {:.6} | Order ID: {}",
-                        hedge_type,
-                        token_type.display_name(),
-                        period_timestamp,
-                        &token_id[..16],
-                        sell_size,
-                        order_id_str
-                    );
-                    crate::log_trading_event(&sell_event);
-                    order1_placed = true;
-                    break;
-                }
-                Err(e) => {
-                    if attempt < MAX_RETRIES {
-                        crate::log_println!("   ⚠️  Failed to place limit sell order 1 (attempt {}): {} - retrying in {} seconds...", attempt, e, RETRY_DELAY_SECS);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
-                    } else {
-                        eprintln!("   ❌ FAILED TO PLACE LIMIT SELL ORDER 1 FOR {} after {} attempts: {}", hedge_type, MAX_RETRIES, e);
-                        warn!("Failed to place limit sell order 1 for {} after {} attempts: {}", hedge_type, MAX_RETRIES, e);
+            crate::log_println!("═══════════════════════════════════════════════════════════");
+            crate::log_println!("📤 PLACING 5 LIMIT SELL ORDERS FOR {} (4 at $0.93, 1 at $0.98)", hedge_type);
+            crate::log_println!("═══════════════════════════════════════════════════════════");
+            crate::log_println!("📊 Token: {} | Token ID: {}", token_type.display_name(), token_id);
+            for (i, (&price, &sz)) in prices.iter().zip(sizes.iter()).enumerate() {
+                crate::log_println!("   Order {}: ${:.2} at ${:.2}, Size: {:.6} shares", i + 1, sz * price, price, sz);
+            }
+            crate::log_println!("");
+            
+            let mut any_placed = false;
+            for (order_num, (price, &order_size)) in prices.iter().zip(sizes.iter()).enumerate() {
+                let one_indexed = order_num + 1;
+                for attempt in 1..=MAX_RETRIES {
+                    let sell_order = OrderRequest {
+                        token_id: token_id.to_string(),
+                        side: "SELL".to_string(),
+                        size: format!("{:.2}", order_size),
+                        price: format!("{:.2}", price),
+                        order_type: "LIMIT".to_string(),
+                    };
+                    match api.place_order(&sell_order).await {
+                        Ok(response) => {
+                            crate::log_println!("   ✅ LIMIT SELL ORDER {} PLACED (attempt {})", one_indexed, attempt);
+                            crate::log_println!("      Limit Price: ${:.2} | Size: {:.6}", price, order_size);
+                            let order_id_str = response.order_id.as_ref().map(|id| format!("{:?}", id)).unwrap_or_else(|| "N/A".to_string());
+                            crate::log_trading_event(&format!(
+                                "LIMIT SELL ORDER ({}) | {} | Period: {} | Token: {} | Price: ${:.2} | Size: {:.6} | ID: {}",
+                                hedge_type, token_type.display_name(), period_timestamp, &token_id[..16], price, order_size, order_id_str
+                            ));
+                            any_placed = true;
+                            break;
+                        }
+                        Err(e) => {
+                            if attempt < MAX_RETRIES {
+                                crate::log_println!("   ⚠️  Order {} failed (attempt {}): {} - retrying...", one_indexed, attempt, e);
+                                tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+                            } else {
+                                warn!("Failed to place limit sell order {} for {}: {}", one_indexed, hedge_type, e);
+                            }
+                        }
                     }
                 }
             }
-        }
-        
-        // Place second order at $0.98 with retry
-        let mut order2_placed = false;
-        for attempt in 1..=MAX_RETRIES {
-            let sell_order_2 = OrderRequest {
-                token_id: token_id.to_string(),
-                side: "SELL".to_string(),
-                size: format!("{:.2}", sell_size),
-                price: format!("{:.2}", 0.98),
-                order_type: "LIMIT".to_string(),
-            };
-            
-            match api.place_order(&sell_order_2).await {
-                Ok(response) => {
-                    crate::log_println!("   ✅ LIMIT SELL ORDER 2 PLACED FOR {} (attempt {})", hedge_type, attempt);
-                    crate::log_println!("      Token: {}", token_type.display_name());
-                    crate::log_println!("      Order ID: {:?}", response.order_id);
-                    crate::log_println!("      Limit Price: $0.98");
-                    crate::log_println!("      Size: {:.6} shares", sell_size);
-                    
-                    let order_id_str = response.order_id.as_ref()
-                        .map(|id| format!("{:?}", id))
-                        .unwrap_or_else(|| "N/A".to_string());
-                    let sell_event = format!(
-                        "LIMIT SELL ORDER ({}) | Market: {} | Period: {} | Token: {} | Limit Price: $0.98 | Size: {:.6} | Order ID: {}",
-                        hedge_type,
-                        token_type.display_name(),
-                        period_timestamp,
-                        &token_id[..16],
-                        sell_size,
-                        order_id_str
-                    );
-                    crate::log_trading_event(&sell_event);
-                    order2_placed = true;
-                    break;
+            if any_placed {
+                let mut pending = pending_trades.lock().await;
+                if let Some(t) = pending.get_mut(trade_key) {
+                    t.limit_sell_orders_placed = true;
                 }
-                Err(e) => {
-                    if attempt < MAX_RETRIES {
-                        crate::log_println!("   ⚠️  Failed to place limit sell order 2 (attempt {}): {} - retrying in {} seconds...", attempt, e, RETRY_DELAY_SECS);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
-                    } else {
-                        eprintln!("   ❌ FAILED TO PLACE LIMIT SELL ORDER 2 FOR {} after {} attempts: {}", hedge_type, MAX_RETRIES, e);
-                        warn!("Failed to place limit sell order 2 for {} after {} attempts: {}", hedge_type, MAX_RETRIES, e);
+            }
+        } else {
+            // Individual/early hedge (price crossed before dual_limit_early_hedge_minutes): no limit sell - hold until closure
+            const HEDGE_SELL_PRICE: f64 = 0.98;
+            crate::log_println!("═══════════════════════════════════════════════════════════");
+            crate::log_println!("📤 PLACING 1 LIMIT SELL ORDER FOR {} at ${:.2} (all {:.6} shares)", hedge_type, HEDGE_SELL_PRICE, sell_size);
+            crate::log_println!("═══════════════════════════════════════════════════════════");
+            crate::log_println!("📊 Token: {} | Size: {:.6} at ${:.2}", token_type.display_name(), sell_size, HEDGE_SELL_PRICE);
+            crate::log_println!("");
+            
+            let mut placed = false;
+            for attempt in 1..=MAX_RETRIES {
+                let sell_order = OrderRequest {
+                    token_id: token_id.to_string(),
+                    side: "SELL".to_string(),
+                    size: format!("{:.2}", sell_size),
+                    price: format!("{:.2}", HEDGE_SELL_PRICE),
+                    order_type: "LIMIT".to_string(),
+                };
+                match api.place_order(&sell_order).await {
+                    Ok(response) => {
+                        crate::log_println!("   ✅ LIMIT SELL ORDER PLACED (attempt {})", attempt);
+                        let order_id_str = response.order_id.as_ref().map(|id| format!("{:?}", id)).unwrap_or_else(|| "N/A".to_string());
+                        crate::log_trading_event(&format!(
+                            "LIMIT SELL ORDER ({}) | {} | Period: {} | Token: {} | Price: ${:.2} | Size: {:.6} | ID: {}",
+                            hedge_type, token_type.display_name(), period_timestamp, &token_id[..16], HEDGE_SELL_PRICE, sell_size, order_id_str
+                        ));
+                        placed = true;
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt < MAX_RETRIES {
+                            crate::log_println!("   ⚠️  Failed (attempt {}): {} - retrying...", attempt, e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+                        } else {
+                            warn!("Failed to place limit sell order for {}: {}", hedge_type, e);
+                        }
                     }
                 }
             }
-        }
-        
-        // Mark that sell orders have been placed (if at least one succeeded)
-        if order1_placed || order2_placed {
-            let mut pending = pending_trades.lock().await;
-            if let Some(t) = pending.get_mut(trade_key) {
-                t.limit_sell_orders_placed = true;
+            if placed {
+                let mut pending = pending_trades.lock().await;
+                if let Some(t) = pending.get_mut(trade_key) {
+                    t.limit_sell_orders_placed = true;
+                }
             }
         }
     }
 
     /// Get the opposite token ID for a given token type and condition ID
     /// Returns the token ID of the opposite token (Up <-> Down)
-    async fn get_opposite_token_id(&self, token_type: &TokenType, condition_id: &str) -> Result<String> {
+    pub async fn get_opposite_token_id(&self, token_type: &TokenType, condition_id: &str) -> Result<String> {
         // Get market details to find the opposite token
         let market_details = self.api.get_market(condition_id).await?;
         
@@ -251,11 +245,80 @@ impl Trader {
         drop(pending);
     }
 
+    /// Get hedge trades (individual or standard) for a given period.
+    /// Returns (condition_id, token_id, token_type) for each hedge position we hold.
+    pub async fn get_hedge_trades_for_period(&self, period_timestamp: u64) -> Vec<(String, String, crate::detector::TokenType)> {
+        let pending = self.pending_trades.lock().await;
+        pending
+            .iter()
+            .filter(|(key, trade)| {
+                trade.market_timestamp == period_timestamp
+                    && (key.ends_with("_individual_hedge") || key.ends_with("_standard_hedge"))
+                    && !trade.sold
+            })
+            .map(|(_, trade)| (trade.condition_id.clone(), trade.token_id.clone(), trade.token_type.clone()))
+            .collect()
+    }
+
     /// Get a pending limit trade (keyed by `"{period}_{token_id}_limit"`)
     pub async fn get_pending_limit_trade(&self, period_timestamp: u64, token_id: &str) -> Option<PendingTrade> {
         let key = format!("{}_{}_limit", period_timestamp, token_id);
         let pending = self.pending_trades.lock().await;
         pending.get(&key).cloned()
+    }
+
+    /// Get a pending limit trade by market (period, condition_id, token_type). Use this when the current
+    /// snapshot's token_id might differ from the token_id used when the order was placed (e.g. simulation).
+    pub async fn get_pending_limit_trade_by_market(
+        &self,
+        period_timestamp: u64,
+        condition_id: &str,
+        token_type: &crate::detector::TokenType,
+    ) -> Option<PendingTrade> {
+        let pending = self.pending_trades.lock().await;
+        for (key, trade) in pending.iter() {
+            if key.ends_with("_limit")
+                && !key.contains("reentry")
+                && trade.market_timestamp == period_timestamp
+                && trade.condition_id == condition_id
+                && trade.token_type == *token_type
+            {
+                return Some(trade.clone());
+            }
+        }
+        None
+    }
+
+    /// List all pending limit trades for a period (key starts with "{period}_" and ends with "_limit").
+    /// Used in simulation to augment current_prices so tracker orders (placed with earlier token_id) can be filled.
+    pub async fn get_pending_limit_trades_for_period(&self, period_timestamp: u64) -> Vec<PendingTrade> {
+        let prefix = format!("{}_", period_timestamp);
+        let pending = self.pending_trades.lock().await;
+        pending
+            .iter()
+            .filter(|(k, _t)| k.starts_with(&prefix) && k.ends_with("_limit") && !k.contains("reentry"))
+            .map(|(_, t)| t.clone())
+            .collect()
+    }
+
+    /// Get a pending re-entry limit trade (keyed by `"{period}_{token_id}_reentry_limit"`)
+    pub async fn get_pending_reentry_limit_trade(&self, period_timestamp: u64, token_id: &str) -> Option<PendingTrade> {
+        let key = format!("{}_{}_reentry_limit", period_timestamp, token_id);
+        let pending = self.pending_trades.lock().await;
+        pending.get(&key).cloned()
+    }
+
+    /// Get a pending trade for (period, token_id) from any key: _limit, _individual_hedge, or _standard_hedge.
+    /// Used by dual-limit same-size low-price exit to find both the limit-filled side and the hedge (market-buy) side.
+    pub async fn get_pending_trade_for_period_token(&self, period_timestamp: u64, token_id: &str) -> Option<PendingTrade> {
+        let pending = self.pending_trades.lock().await;
+        for suffix in &["_limit", "_individual_hedge", "_standard_hedge"] {
+            let key = format!("{}_{}{}", period_timestamp, token_id, suffix);
+            if let Some(trade) = pending.get(&key) {
+                return Some(trade.clone());
+            }
+        }
+        None
     }
 
     /// Cancel a pending LIMIT BUY order for the given token/period and remove it from tracking
@@ -290,7 +353,50 @@ impl Trader {
         pending.remove(&key);
         Ok(())
     }
-    
+
+    /// After a market-order hedge for the unfilled side, mark the pending _limit trade for that token
+    /// as filled (confirmed_balance + buy_order_confirmed) so check_pending_trades does not later
+    /// Returns current token balance in shares (f64). None on API error or parse error.
+    /// Used to skip hedge market buy when we already have >= dual_limit_shares.
+    pub async fn get_token_balance_shares(&self, token_id: &str) -> Option<f64> {
+        match self.api.check_balance_only(token_id).await {
+            Ok(balance) => {
+                let balance_decimal = balance / rust_decimal::Decimal::from(1_000_000u64);
+                f64::try_from(balance_decimal).ok()
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// attribute the balance increase to a "limit fill" and log "LIMIT BUY ORDER FILLED" again.
+    /// Uses max(current_balance, existing t.units) for units so a stale/partial balance check
+    /// (e.g. right after market order when chain hasn't settled) does not understate the position.
+    pub async fn mark_limit_trade_filled_by_hedge(&self, period_timestamp: u64, token_id: &str) {
+        let key = format!("{}_{}_limit", period_timestamp, token_id);
+        let current_balance = match self.api.check_balance_only(token_id).await {
+            Ok(balance) => {
+                use rust_decimal::Decimal;
+                let balance_decimal = balance / Decimal::from(1_000_000u64);
+                f64::try_from(balance_decimal).unwrap_or(0.0)
+            }
+            Err(_) => return,
+        };
+        let mut pending = self.pending_trades.lock().await;
+        if let Some(t) = pending.get_mut(&key) {
+            if !t.buy_order_confirmed {
+                t.confirmed_balance = Some(current_balance);
+                // Real balance is the source of truth; never reduce units below existing (avoids 0.92 when we had 30 + 0.92 settling)
+                let existing_units = t.units;
+                t.units = if current_balance > existing_units {
+                    current_balance
+                } else {
+                    existing_units
+                };
+                t.buy_order_confirmed = true;
+            }
+        }
+    }
+
     /// Sync pending trades with actual portfolio balance
     /// Checks if tokens are still in portfolio - if balance is 0, mark as sold (already redeemed)
     /// This prevents the bot from trying to redeem already-redeemed tokens
@@ -403,61 +509,60 @@ impl Trader {
             );
         }
         
-        // Use investment amount override if provided (e.g., for individual hedges that need double amount)
-        let fixed_amount = opportunity.investment_amount_override.unwrap_or(self.config.fixed_trade_amount);
+        // Use investment amount override if provided. For hedge: individual (early) = 5x, standard = 5x.
+        let is_hedge = opportunity.is_individual_hedge || opportunity.is_standard_hedge;
+        let fixed_amount = if let Some(override_amt) = opportunity.investment_amount_override {
+            override_amt
+        } else if is_hedge {
+            // Safeguard: use 5x for early hedge, 5x for standard hedge
+            let fallback = if opportunity.is_individual_hedge {
+                self.config.fixed_trade_amount * 5.0
+            } else {
+                self.config.fixed_trade_amount * 5.0
+            };
+            warn!("Hedge buy had no investment_amount_override; using fallback = ${:.2}", fallback);
+            fallback
+        } else {
+            self.config.fixed_trade_amount
+        };
         
-        // Calculate units for the token
-        let units = fixed_amount / opportunity.bid_price;
+        // When dual_limit_shares is set, use exact share count (e.g. trailing bot second token = same shares as first token); order amount = units * price.
+        let (units, order_amount) = if let Some(exact_shares) = opportunity.dual_limit_shares {
+            let amt = exact_shares * opportunity.bid_price;
+            (exact_shares, amt)
+        } else {
+            let u = fixed_amount / opportunity.bid_price;
+            (u, fixed_amount)
+        };
         let total_cost = units * opportunity.bid_price;
         let expected_profit_at_sell = (self.config.sell_price - opportunity.bid_price) * units;
         
-        crate::log_println!("═══════════════════════════════════════════════════════════");
-        crate::log_println!("💰 EXECUTING BUY ORDER");
-        crate::log_println!("═══════════════════════════════════════════════════════════");
-        crate::log_println!("📊 Order Details:");
-        crate::log_println!("   Token Type: {}", opportunity.token_type.display_name());
-        crate::log_println!("   Token ID: {}", opportunity.token_id);
-        crate::log_println!("   Condition ID: {}", opportunity.condition_id);
-        crate::log_println!("   Side: BUY");
-        crate::log_println!("   Price: ${:.6}", opportunity.bid_price);
-        crate::log_println!("   Units: {:.6}", units);
-        crate::log_println!("   Total Cost: ${:.6}", total_cost);
-        crate::log_println!("   Investment Amount: ${:.2}", fixed_amount);
-        crate::log_println!("");
-        crate::log_println!("📈 Trade Parameters:");
-        crate::log_println!("   Target sell price: ${:.6}", self.config.sell_price);
-        crate::log_println!("   Expected profit at sell: ${:.6}", expected_profit_at_sell);
-        crate::log_println!("   Time elapsed: {}m {}s", 
-              opportunity.time_elapsed_seconds / 60, opportunity.time_elapsed_seconds % 60);
-        crate::log_println!("   Time remaining: {}s (minimum required: {}s)", 
-              opportunity.time_remaining_seconds, min_time_remaining);
-        crate::log_println!("   Period timestamp: {}", opportunity.period_timestamp);
-        crate::log_println!("");
-        
+        let market_name = opportunity.token_type.display_name();
+        crate::log_println!("💰 BUY | {} | ${:.2} × {:.2} = ${:.2} | Period {} | {}m {}s elapsed",
+            market_name, opportunity.bid_price, units, total_cost, opportunity.period_timestamp,
+            opportunity.time_elapsed_seconds / 60, opportunity.time_elapsed_seconds % 60);
+
         if self.simulation_mode {
-            crate::log_println!("🎮 SIMULATION MODE - Creating limit buy order");
-            crate::log_println!("   ✅ SIMULATION: Limit buy order created:");
-            crate::log_println!("      - Token Type: {}", opportunity.token_type.display_name());
-            crate::log_println!("      - Token: {}", &opportunity.token_id[..16]);
-            crate::log_println!("      - Units: {:.6}", units);
-            crate::log_println!("      - Price: ${:.6}", opportunity.bid_price);
-            crate::log_println!("      - Total: ${:.6}", total_cost);
-            crate::log_println!("      - Strategy: Hold until market closure (claim $1.00 if winning, $0.00 if losing)");
-            
-            // In simulation mode, create a limit order that will be checked for fills
-            if let Some(tracker) = &self.simulation_tracker {
-                tracker.add_limit_order(
-                    opportunity.token_id.clone(),
-                    opportunity.token_type.clone(),
-                    opportunity.condition_id.clone(),
-                    opportunity.bid_price,
-                    units,
-                    "BUY".to_string(),
-                    opportunity.period_timestamp,
-                ).await;
-                
-                // Also track as pending trade for consistency
-                // In simulation mode, we hold positions until market closure (no selling)
+            // In simulation: market order = immediate fill at current price; limit order = wait for price to cross.
+            if opportunity.use_market_order {
+                crate::log_println!("🎮 SIMULATION MODE - Market buy (filled immediately at ${:.6})", opportunity.bid_price);
+                crate::log_println!("   ✅ SIMULATION: Market buy filled:");
+                crate::log_println!("      - Token Type: {}", opportunity.token_type.display_name());
+                crate::log_println!("      - Token: {}", &opportunity.token_id[..16]);
+                crate::log_println!("      - Units: {:.6}", units);
+                crate::log_println!("      - Price: ${:.6}", opportunity.bid_price);
+                crate::log_println!("      - Total: ${:.6}", total_cost);
+                crate::log_println!("      - Strategy: Hold until market closure (claim $1.00 if winning, $0.00 if losing)");
+                if let Some(tracker) = &self.simulation_tracker {
+                    tracker.add_market_buy_position(
+                        opportunity.token_id.clone(),
+                        opportunity.token_type.clone(),
+                        opportunity.condition_id.clone(),
+                        opportunity.bid_price,
+                        units,
+                        opportunity.period_timestamp,
+                    ).await;
+                }
                 let trade_key = format!("{}_{}_market", opportunity.period_timestamp, opportunity.token_id);
                 let mut pending = self.pending_trades.lock().await;
                 let trade = PendingTrade {
@@ -465,52 +570,85 @@ impl Trader {
                     condition_id: opportunity.condition_id.clone(),
                     token_type: opportunity.token_type.clone(),
                     order_id: None,
-                    investment_amount: fixed_amount,
+                    investment_amount: order_amount,
                     units,
                     purchase_price: opportunity.bid_price,
-                    sell_price: self.config.sell_price, // Not used in simulation - positions held until closure
+                    sell_price: self.config.sell_price,
+                    timestamp: std::time::Instant::now(),
+                    market_timestamp: opportunity.period_timestamp,
+                    sold: false,
+                    confirmed_balance: Some(units),
+                    buy_order_confirmed: true, // Market order fills immediately in simulation
+                    limit_sell_orders_placed: false,
+                    no_sell: true,
+                    claim_on_closure: true,
+                    sell_attempts: 0,
+                    redemption_attempts: 0,
+                    redemption_abandoned: false,
+                };
+                pending.insert(trade_key, trade);
+            } else {
+                crate::log_println!("🎮 SIMULATION MODE - Creating limit buy order");
+                crate::log_println!("   ✅ SIMULATION: Limit buy order created:");
+                crate::log_println!("      - Token Type: {}", opportunity.token_type.display_name());
+                crate::log_println!("      - Token: {}", &opportunity.token_id[..16]);
+                crate::log_println!("      - Units: {:.6}", units);
+                crate::log_println!("      - Price: ${:.6}", opportunity.bid_price);
+                crate::log_println!("      - Total: ${:.6}", total_cost);
+                crate::log_println!("      - Strategy: Hold until market closure (claim $1.00 if winning, $0.00 if losing)");
+                if let Some(tracker) = &self.simulation_tracker {
+                    tracker.add_limit_order(
+                        opportunity.token_id.clone(),
+                        opportunity.token_type.clone(),
+                        opportunity.condition_id.clone(),
+                        opportunity.bid_price,
+                        units,
+                        "BUY".to_string(),
+                        opportunity.period_timestamp,
+                    ).await;
+                }
+                let trade_key = format!("{}_{}_market", opportunity.period_timestamp, opportunity.token_id);
+                let mut pending = self.pending_trades.lock().await;
+                let trade = PendingTrade {
+                    token_id: opportunity.token_id.clone(),
+                    condition_id: opportunity.condition_id.clone(),
+                    token_type: opportunity.token_type.clone(),
+                    order_id: None,
+                    investment_amount: order_amount,
+                    units,
+                    purchase_price: opportunity.bid_price,
+                    sell_price: self.config.sell_price,
                     timestamp: std::time::Instant::now(),
                     market_timestamp: opportunity.period_timestamp,
                     sold: false,
                     confirmed_balance: None,
                     buy_order_confirmed: false,
-                    limit_sell_orders_placed: false, // No sell orders in simulation - hold until closure
-                    no_sell: true, // Mark as no_sell since we hold until market closure
-                    claim_on_closure: true, // Will claim at market closure
+                    limit_sell_orders_placed: false,
+                    no_sell: true,
+                    claim_on_closure: true,
                     sell_attempts: 0,
                     redemption_attempts: 0,
                     redemption_abandoned: false,
                 };
                 pending.insert(trade_key, trade);
             }
-            
             return Ok(());
         } else {
             // Place real market order
             // For BUY market orders, we pass USD value (not units)
             // The exchange will determine how many units we get at market price
-            crate::log_println!("🚀 PRODUCTION MODE - Placing order on exchange");
-            crate::log_println!("   Order parameters:");
-            crate::log_println!("      Token Type: {}", opportunity.token_type.display_name());
-            crate::log_println!("      Token ID: {}", opportunity.token_id);
-            crate::log_println!("      Side: BUY");
-            crate::log_println!("      Amount: ${:.6} (market order - units determined by market price)", fixed_amount);
-            crate::log_println!("      Type: FOK (Fill-or-Kill)");
-            
             match self.api.place_market_order(
                 &opportunity.token_id,
-                fixed_amount,  // USD value for BUY market orders
+                order_amount,  // USD value for BUY market orders (exact shares * price when dual_limit_shares set)
                 "BUY",
-                Some("FOK"),
+                Some("FAK"),
             ).await {
                 Ok(response) => {
-                    crate::log_println!("   ✅ ORDER PLACED SUCCESSFULLY");
-                    crate::log_println!("      Order ID: {:?}", response.order_id);
-                    crate::log_println!("      Status: {}", response.status);
-                    if let Some(msg) = &response.message {
-                        crate::log_println!("      Message: {}", msg);
-                    }
-                    
+                    let order_id_short = response.order_id.as_ref()
+                        .map(|id| if id.len() > 18 { format!("{}…", &id[..18]) } else { id.clone() })
+                        .unwrap_or_else(|| "N/A".to_string());
+                    crate::log_println!("   ✅ Filled | Order {} | {} shares", order_id_short, units);
+
                     // For hedge trades, spawn background task to wait 7 seconds then place limit sell orders
                     // This is non-blocking so monitoring continues
                     let is_individual_hedge = opportunity.is_individual_hedge;
@@ -536,30 +674,21 @@ impl Trader {
                     };
                     
                     let balance_confirmed = is_hedge_trade || balance_f64 > 0.0;
-                    
-                    crate::log_println!("   ✅ BUY ORDER CONFIRMED");
-                    crate::log_println!("      Expected Units: {:.6} shares", units);
-                    if is_hedge_trade {
-                        crate::log_println!("      Using expected units for limit sell order placement");
-                    } else {
-                        crate::log_println!("      Portfolio Balance: {:.6} shares", balance_f64);
-                    }
-                    
+
                     // Log successful buy order to history.toml
-                    let market_name = opportunity.token_type.display_name();
                     let order_id_str = response.order_id.as_ref()
                         .map(|id| format!("{:?}", id))
                         .unwrap_or_else(|| "N/A".to_string());
                     
                     if balance_confirmed {
                         // Balance of portfolio is confirmed exactly - use this balance_f64 for all downstream logic
-                        crate::log_println!("      ✅ Balance confirmed - tokens received successfully");
-                        crate::log_println!("      📊 Confirmed portfolio balance: {:.6} shares", balance_f64);
-                        
+                        if !is_hedge_trade {
+                            crate::log_println!("   Balance: {:.2} shares", balance_f64);
+                        }
                         // Track the trade with confirmed balance
                         // For dual limit bot: 
-                        // - If is_individual_hedge is true, this is an individual hedge that should place a limit sell order at config.sell_price
-                        // - If is_standard_hedge is true, this is a standard hedge (after dual_limit_hedge_after_minutes) that should place a limit sell order at $0.98
+                        // - If is_individual_hedge is true, early hedge - no limit sell; hold until closure
+                        // - If is_standard_hedge is true, this is a standard hedge that should place 5 limit sell orders (4 at $0.93, 1 at $0.98) after 7 seconds
                         // - If use_market_order is true but neither is_individual_hedge nor is_standard_hedge, this is a multi-market hedge that should be held until closure
                         let is_individual_hedge = opportunity.is_individual_hedge;
                         let is_standard_hedge = opportunity.is_standard_hedge;
@@ -569,7 +698,7 @@ impl Trader {
                             condition_id: opportunity.condition_id.clone(),
                             token_type: opportunity.token_type.clone(),
                             order_id: response.order_id.clone(),
-                            investment_amount: fixed_amount,
+                            investment_amount: order_amount,
                             units: balance_f64, // Use actual confirmed balance
                             purchase_price: opportunity.bid_price,
                             sell_price: self.config.sell_price,
@@ -578,9 +707,9 @@ impl Trader {
                             sold: false,
                             confirmed_balance: Some(balance_f64),
                             buy_order_confirmed: true,
-                            limit_sell_orders_placed: false, // Will be set to true after placing sell orders
-                            no_sell: is_dual_limit_hedge, // Don't sell multi-market hedge trades - hold until closure. Individual hedges can sell.
-                            claim_on_closure: is_dual_limit_hedge, // Will claim at market closure
+                            limit_sell_orders_placed: false, // Will be set to true after placing sell orders (standard hedge only)
+                            no_sell: is_dual_limit_hedge || is_individual_hedge, // Hold until closure: multi-market hedge and early (individual) hedge
+                            claim_on_closure: is_dual_limit_hedge || is_individual_hedge, // Will claim at market closure
                             sell_attempts: 0,
                             redemption_attempts: 0,
                             redemption_abandoned: false,
@@ -601,12 +730,94 @@ impl Trader {
                         if is_dual_limit_hedge {
                             debug!("Created hedge trade with no_sell=true, key: {}", trade_key);
                         } else if is_individual_hedge {
-                            debug!("Created individual hedge trade with no_sell=false, key: {}", trade_key);
+                            debug!("Created individual hedge trade with no_sell=true (hold until closure), key: {}", trade_key);
                         }
                         pending.insert(trade_key.clone(), trade.clone());
                         drop(pending);
                         
-                        // For standard hedges, spawn background task to place 2 limit sell orders at $0.93 and $0.98 after 7 seconds
+                        // After hedge buy (or any buy with dual_limit_shares, e.g. trailing second token): check filled amount and top up with a market order if below expected (same size).
+                        if (is_hedge_trade || opportunity.dual_limit_shares.is_some()) && !self.simulation_mode {
+                            let api_clone = self.api.clone();
+                            let pending_clone = self.pending_trades.clone();
+                            let token_id_clone = opportunity.token_id.clone();
+                            let trade_key_clone = trade_key.clone();
+                            let expected_units = units;
+                            let bid_price = opportunity.bid_price;
+                            let market_name_hedge = opportunity.token_type.display_name().to_string();
+                            tokio::spawn(async move {
+                                // Wait 5s so first order's balance has time to settle (avoid 0.00 and double-buying).
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                // Compare real token balance to expected target (dual_limit_shares from config).
+                                let mut current_balance = match api_clone.check_balance_only(&token_id_clone).await {
+                                    Ok(balance) => {
+                                        let balance_decimal = balance / rust_decimal::Decimal::from(1_000_000u64);
+                                        f64::try_from(balance_decimal).unwrap_or(0.0)
+                                    }
+                                    Err(_) => return,
+                                };
+                                // If balance still 0 or very low, wait 3s more (might be stale).
+                                if current_balance < expected_units * 0.5 {
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                                    if let Ok(balance) = api_clone.check_balance_only(&token_id_clone).await {
+                                        let balance_decimal = balance / rust_decimal::Decimal::from(1_000_000u64);
+                                        current_balance = f64::try_from(balance_decimal).unwrap_or(0.0);
+                                    }
+                                }
+                                if current_balance >= expected_units - 0.01 {
+                                    return;
+                                }
+                                let shortfall = expected_units - current_balance;
+                                // Skip if shortfall is more than half of expected (balance likely stale; avoid double-buy).
+                                if shortfall > expected_units * 0.5 {
+                                    return;
+                                }
+                                // Cap top-up so we only add enough to reach expected_units + 0.5 (acceptable "a little more", under 31).
+                                let max_top_up_shares = (expected_units + 0.5 - current_balance).max(0.0);
+                                let top_up_shares = shortfall.min(max_top_up_shares);
+                                // Only top up if shortfall is at least 2 shares (exchange min $1; ignore small gaps).
+                                if top_up_shares < 2.0 {
+                                    return;
+                                }
+                                let top_up_usd = (top_up_shares * bid_price * 1.03).max(1.0); // exchange min $1
+                                crate::log_println!("   📤 Hedge top-up: {} has {:.2} shares, need {:.2} → buying ~{:.2} more (${:.2})",
+                                    market_name_hedge, current_balance, expected_units, top_up_shares, top_up_usd);
+                                let mut top_up_ok = false;
+                                for attempt in 1..=3 {
+                                    match api_clone.place_market_order(&token_id_clone, top_up_usd, "BUY", Some("FAK")).await {
+                                        Ok(_) => {
+                                            top_up_ok = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            warn!("Hedge top-up order failed (attempt {}/3): {}", attempt, e);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                if !top_up_ok {
+                                    warn!("Hedge top-up failed after 3 attempts - position may be short");
+                                    return;
+                                }
+                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                let new_balance = match api_clone.check_balance_only(&token_id_clone).await {
+                                    Ok(balance) => {
+                                        let balance_decimal = balance / rust_decimal::Decimal::from(1_000_000u64);
+                                        f64::try_from(balance_decimal).unwrap_or(0.0)
+                                    }
+                                    Err(_) => return,
+                                };
+                                let mut pending = pending_clone.lock().await;
+                                if let Some(t) = pending.get_mut(&trade_key_clone) {
+                                    t.units = new_balance;
+                                    t.confirmed_balance = Some(new_balance);
+                                    crate::log_println!("   ✅ Hedge top-up done: {} balance now {:.2} shares", market_name_hedge, new_balance);
+                                }
+                            });
+                        }
+                        
+                        // For standard hedges, spawn background task to place 5 limit sell orders (4 at $0.93, 1 at $0.98) after 7 seconds
                         if is_standard_hedge && !self.simulation_mode {
                             let api_clone = self.api.clone();
                             let trade_key_clone = trade_key.clone();
@@ -634,33 +845,7 @@ impl Trader {
                             });
                         }
                         
-                        // For individual hedges, spawn background task to place 2 limit sell orders at $0.93 and $0.98 after 7 seconds
-                        if is_individual_hedge && !self.simulation_mode {
-                            let api_clone = self.api.clone();
-                            let trade_key_clone = trade_key.clone();
-                            let token_id_clone = opportunity.token_id.clone();
-                            let token_type_clone = opportunity.token_type.clone();
-                            let period_timestamp = opportunity.period_timestamp;
-                            let pending_trades_clone = self.pending_trades.clone();
-                            let sell_size = opportunity.dual_limit_shares.unwrap_or(units);
-                            
-                            // Spawn non-blocking background task
-                            tokio::spawn(async move {
-                                crate::log_println!("   ⏳ Waiting 7 seconds before placing limit sell orders for individual hedge (non-blocking)...");
-                                tokio::time::sleep(tokio::time::Duration::from_secs(7)).await;
-                                
-                                Self::place_hedge_sell_orders_with_retry(
-                                    &api_clone,
-                                    &pending_trades_clone,
-                                    &trade_key_clone,
-                                    &token_id_clone,
-                                    &token_type_clone,
-                                    period_timestamp,
-                                    sell_size,
-                                    false, // is_standard_hedge (false = individual hedge)
-                                ).await;
-                            });
-                        }
+                        // Early (individual) hedge: no limit sell at $0.98 - hold until closure
                         
                         // Log structured buy order event to history.toml with allowance status
                         let market_name = opportunity.token_type.display_name();
@@ -679,8 +864,7 @@ impl Trader {
                         );
                         crate::log_trading_event(&buy_event);
                         
-                        crate::log_println!("   ✅ Trade stored successfully. Will monitor price and sell at ${:.6} or market close.", 
-                              self.config.sell_price);
+                        crate::log_println!("   Sell target: ${:.2}", self.config.sell_price);
                         
                         let mut trades = self.trades_executed.lock().await;
                         *trades += 1;
@@ -709,8 +893,7 @@ impl Trader {
                         );
                         crate::log_trading_event(&buy_event);
                         
-                        warn!("⚠️  Balance mismatch: Expected ~{:.6} shares, but only have {:.6} shares", units, balance_f64);
-                        warn!("   The buy order may not have executed fully, or price changed significantly");
+                        warn!("⚠️  Balance: expected ~{:.2} shares, got {:.2} (order may be partial or still settling)", units, balance_f64);
                         // Still store the trade but mark as unconfirmed
                         // For dual limit bot: 
                         // - If is_individual_hedge is true, this is an individual hedge that should place a limit sell order at config.sell_price
@@ -724,7 +907,7 @@ impl Trader {
                             condition_id: opportunity.condition_id.clone(),
                             token_type: opportunity.token_type.clone(),
                             order_id: response.order_id.clone(),
-                            investment_amount: fixed_amount,
+                            investment_amount: order_amount,
                             units: balance_f64, // Use actual balance
                             purchase_price: opportunity.bid_price,
                             sell_price: self.config.sell_price,
@@ -733,9 +916,9 @@ impl Trader {
                             sold: false,
                             confirmed_balance: Some(balance_f64),
                             buy_order_confirmed: balance_f64 > 0.0, // Confirmed if we have any tokens
-                            limit_sell_orders_placed: false, // Will be set to true after placing sell orders
-                            no_sell: is_dual_limit_hedge, // Don't sell multi-market hedge trades - hold until closure. Individual hedges can sell.
-                            claim_on_closure: is_dual_limit_hedge, // Will claim at market closure
+                            limit_sell_orders_placed: false, // Will be set to true after placing sell orders (standard hedge only)
+                            no_sell: is_dual_limit_hedge || is_individual_hedge, // Hold until closure: multi-market hedge and early (individual) hedge
+                            claim_on_closure: is_dual_limit_hedge || is_individual_hedge, // Will claim at market closure
                             sell_attempts: 0,
                             redemption_attempts: 0,
                             redemption_abandoned: false,
@@ -754,22 +937,95 @@ impl Trader {
                         if is_dual_limit_hedge {
                             debug!("Created hedge trade with no_sell=true (balance mismatch), key: {}", trade_key);
                         } else if is_individual_hedge {
-                            debug!("Created individual hedge trade with no_sell=false (balance mismatch), key: {}", trade_key);
+                            debug!("Created individual hedge trade with no_sell=true (balance mismatch), key: {}", trade_key);
                         }
                         pending.insert(trade_key.clone(), trade.clone());
                         drop(pending);
                         
-                        // IMPORTANT: Limit sell orders for hedges are ONLY placed after balance confirmation
-                        // If balance confirmation failed or timed out, we skip placing limit sell orders
-                        // The trade will be tracked, and limit sell orders will be placed later once balance is confirmed
-                        if is_standard_hedge {
-                            warn!("⚠️  Balance confirmation failed or timed out for standard hedge - skipping limit sell order placement");
-                            warn!("   Limit sell order will be placed once balance is confirmed in next check");
+                        // Check filled amount and top up if below expected (same as balance_confirmed path).
+                        if is_hedge_trade && !self.simulation_mode {
+                            let api_clone = self.api.clone();
+                            let pending_clone = self.pending_trades.clone();
+                            let token_id_clone = opportunity.token_id.clone();
+                            let trade_key_clone = trade_key.clone();
+                            let expected_units = units;
+                            let bid_price = opportunity.bid_price;
+                            let market_name_hedge = opportunity.token_type.display_name().to_string();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                // Compare real token balance to expected target (dual_limit_shares from config).
+                                let mut current_balance = match api_clone.check_balance_only(&token_id_clone).await {
+                                    Ok(balance) => {
+                                        let balance_decimal = balance / rust_decimal::Decimal::from(1_000_000u64);
+                                        f64::try_from(balance_decimal).unwrap_or(0.0)
+                                    }
+                                    Err(_) => return,
+                                };
+                                if current_balance < expected_units * 0.5 {
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                                    if let Ok(balance) = api_clone.check_balance_only(&token_id_clone).await {
+                                        let balance_decimal = balance / rust_decimal::Decimal::from(1_000_000u64);
+                                        current_balance = f64::try_from(balance_decimal).unwrap_or(0.0);
+                                    }
+                                }
+                                if current_balance >= expected_units - 0.01 {
+                                    return;
+                                }
+                                let shortfall = expected_units - current_balance;
+                                // Skip if shortfall is more than half of expected (balance likely stale; avoid double-buy).
+                                if shortfall > expected_units * 0.5 {
+                                    return;
+                                }
+                                let max_top_up_shares = (expected_units + 0.5 - current_balance).max(0.0);
+                                let top_up_shares = shortfall.min(max_top_up_shares);
+                                // Only top up if shortfall is at least 2 shares (exchange min $1; ignore small gaps).
+                                if top_up_shares < 2.0 {
+                                    return;
+                                }
+                                let top_up_usd = (top_up_shares * bid_price * 1.03).max(1.0); // exchange min $1
+                                crate::log_println!("   📤 Hedge top-up: {} has {:.2} shares, need {:.2} → buying ~{:.2} more (${:.2})",
+                                    market_name_hedge, current_balance, expected_units, top_up_shares, top_up_usd);
+                                let mut top_up_ok = false;
+                                for attempt in 1..=3 {
+                                    match api_clone.place_market_order(&token_id_clone, top_up_usd, "BUY", Some("FAK")).await {
+                                        Ok(_) => {
+                                            top_up_ok = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            warn!("Hedge top-up order failed (attempt {}/3): {}", attempt, e);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                if !top_up_ok {
+                                    warn!("Hedge top-up failed after 3 attempts - position may be short");
+                                    return;
+                                }
+                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                let new_balance = match api_clone.check_balance_only(&token_id_clone).await {
+                                    Ok(balance) => {
+                                        let balance_decimal = balance / rust_decimal::Decimal::from(1_000_000u64);
+                                        f64::try_from(balance_decimal).unwrap_or(0.0)
+                                    }
+                                    Err(_) => return,
+                                };
+                                let mut pending = pending_clone.lock().await;
+                                if let Some(t) = pending.get_mut(&trade_key_clone) {
+                                    t.units = new_balance;
+                                    t.confirmed_balance = Some(new_balance);
+                                    crate::log_println!("   ✅ Hedge top-up done: {} balance now {:.2} shares", market_name_hedge, new_balance);
+                                }
+                            });
                         }
                         
-                        // For individual hedges, also skip if balance not confirmed
-                        if is_individual_hedge {
-                            warn!("⚠️  Balance confirmation failed or timed out for individual hedge - skipping limit sell order placement");
+                        // IMPORTANT: Limit sell orders for standard hedge are ONLY placed after balance confirmation
+                        // If balance confirmation failed or timed out, we skip placing limit sell orders
+                        // Individual (early) hedge: no limit sell - hold until closure
+                        if is_standard_hedge {
+                            warn!("⚠️  Balance confirmation failed or timed out for standard hedge - skipping limit sell order placement");
                             warn!("   Limit sell order will be placed once balance is confirmed in next check");
                         }
                         
@@ -829,7 +1085,7 @@ impl Trader {
                 condition_id: opportunity.condition_id.clone(),
                 token_type: opportunity.token_type.clone(),
                 order_id: None,
-            investment_amount: fixed_amount,
+            investment_amount: order_amount,
             units,
                 purchase_price: opportunity.bid_price,
             sell_price: self.config.sell_price,
@@ -866,11 +1122,13 @@ impl Trader {
     /// Execute limit buy order - places limit buy for both Up and Down tokens
     /// When a buy order fills, immediately places ONE limit sell order at sell_price (profit target)
     /// Stop-loss is disabled for limit order version
+    /// If is_reentry is true, the order is tracked under _reentry_limit key (so it does not overwrite the original 0.45 fill).
     pub async fn execute_limit_buy(
         &self,
         opportunity: &BuyOpportunity,
         place_sell_orders: bool,
         size_override: Option<f64>,
+        is_reentry: bool,
     ) -> Result<()> {
         let fixed_amount = self.config.fixed_trade_amount;
         let units = size_override.unwrap_or_else(|| fixed_amount / opportunity.bid_price);
@@ -923,7 +1181,11 @@ impl Trader {
                 
                 // Also track as pending trade for consistency
                 // In simulation mode, we hold positions until market closure (no selling)
-                let trade_key = format!("{}_{}_limit", opportunity.period_timestamp, opportunity.token_id);
+                let trade_key = if is_reentry {
+                    format!("{}_{}_reentry_limit", opportunity.period_timestamp, opportunity.token_id)
+                } else {
+                    format!("{}_{}_limit", opportunity.period_timestamp, opportunity.token_id)
+                };
                 let mut pending = self.pending_trades.lock().await;
                 let trade = PendingTrade {
                     token_id: opportunity.token_id.clone(),
@@ -978,19 +1240,14 @@ impl Trader {
                 }
                 
                 // Track the limit order - we'll check for fills in check_pending_trades
-                let trade_key = format!("{}_{}_limit", opportunity.period_timestamp, opportunity.token_id);
+                let trade_key = if is_reentry {
+                    format!("{}_{}_reentry_limit", opportunity.period_timestamp, opportunity.token_id)
+                } else {
+                    format!("{}_{}_limit", opportunity.period_timestamp, opportunity.token_id)
+                };
                 let mut pending = self.pending_trades.lock().await;
                 
-                // Store initial balance to detect fills
-                let initial_balance = match self.api.check_balance_only(&opportunity.token_id).await {
-                    Ok(balance) => {
-                        let balance_decimal = balance / Decimal::from(1_000_000u64);
-                        f64::try_from(balance_decimal).unwrap_or(0.0)
-                    }
-                    Err(_) => 0.0,
-                };
-                
-                // Store both sell prices in the trade (we'll use sell_price as the primary one for tracking)
+                // Store initial balance to detect fills (0 = assume no prior balance; hedge sizing uses config dual_limit_shares)
                 let trade = PendingTrade {
                     token_id: opportunity.token_id.clone(),
                     condition_id: opportunity.condition_id.clone(),
@@ -1003,7 +1260,7 @@ impl Trader {
                     timestamp: std::time::Instant::now(),
                     market_timestamp: opportunity.period_timestamp,
                     sold: false,
-                    confirmed_balance: Some(initial_balance),
+                    confirmed_balance: Some(0.0),
                     buy_order_confirmed: false, // Will be true when limit order fills
                     limit_sell_orders_placed: false, // Will be set to true after placing sell orders
                     no_sell: !place_sell_orders,
@@ -1023,7 +1280,6 @@ impl Trader {
                 } else {
                     crate::log_println!("   📝 Order tracked - will monitor for fill and log confirmation only");
                 }
-                crate::log_println!("   💡 Initial balance: {:.6} shares", initial_balance);
                 
                 // Log the limit order event
                 let order_id_str = response.order_id.as_ref()
@@ -1047,6 +1303,149 @@ impl Trader {
             }
         }
         
+        Ok(())
+    }
+
+    /// Place multiple limit buy orders in one batch request. Uses the same limit price and size for all.
+    /// Returns one OrderResponse per opportunity in the same order; success is when message starts with "Order ID:".
+    pub async fn execute_limit_buy_batch(
+        &self,
+        opportunities: &[BuyOpportunity],
+        limit_price: f64,
+        limit_shares: f64,
+        place_sell_orders: bool,
+        is_reentry: bool,
+    ) -> Result<Vec<crate::models::OrderResponse>> {
+        if opportunities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sell_price = self.config.sell_price;
+        let investment_amount = limit_shares * limit_price;
+        let size_formatted = format!("{:.2}", limit_shares);
+        let price_formatted = format!("{:.2}", limit_price);
+
+        if self.simulation_mode {
+            for opp in opportunities {
+                if let Some(tracker) = &self.simulation_tracker {
+                    tracker.add_limit_order(
+                        opp.token_id.clone(),
+                        opp.token_type.clone(),
+                        opp.condition_id.clone(),
+                        limit_price,
+                        limit_shares,
+                        "BUY".to_string(),
+                        opp.period_timestamp,
+                    ).await;
+                }
+                let trade_key = if is_reentry {
+                    format!("{}_{}_reentry_limit", opp.period_timestamp, opp.token_id)
+                } else {
+                    format!("{}_{}_limit", opp.period_timestamp, opp.token_id)
+                };
+                let mut pending = self.pending_trades.lock().await;
+                let trade = PendingTrade {
+                    token_id: opp.token_id.clone(),
+                    condition_id: opp.condition_id.clone(),
+                    token_type: opp.token_type.clone(),
+                    order_id: None,
+                    investment_amount,
+                    units: limit_shares,
+                    purchase_price: limit_price,
+                    sell_price: self.config.sell_price,
+                    timestamp: std::time::Instant::now(),
+                    market_timestamp: opp.period_timestamp,
+                    sold: false,
+                    confirmed_balance: None,
+                    buy_order_confirmed: false,
+                    limit_sell_orders_placed: false,
+                    no_sell: !place_sell_orders,
+                    claim_on_closure: true,
+                    sell_attempts: 0,
+                    redemption_attempts: 0,
+                    redemption_abandoned: false,
+                };
+                pending.insert(trade_key, trade);
+            }
+            return Ok((0..opportunities.len()).map(|_| crate::models::OrderResponse {
+                order_id: None,
+                status: "simulation".to_string(),
+                message: Some("Order ID: simulation".to_string()),
+            }).collect());
+        }
+
+        use crate::models::OrderRequest;
+        let orders: Vec<OrderRequest> = opportunities.iter()
+            .map(|opp| OrderRequest {
+                token_id: opp.token_id.clone(),
+                side: "BUY".to_string(),
+                size: size_formatted.clone(),
+                price: price_formatted.clone(),
+                order_type: "LIMIT".to_string(),
+            })
+            .collect();
+        let responses = self.api.place_limit_orders(&orders).await?;
+        for (opp, response) in opportunities.iter().zip(responses.iter()) {
+            let success = response.message.as_deref().map_or(false, |m| m.starts_with("Order ID"));
+            if !success {
+                continue;
+            }
+            let trade_key = if is_reentry {
+                format!("{}_{}_reentry_limit", opp.period_timestamp, opp.token_id)
+            } else {
+                format!("{}_{}_limit", opp.period_timestamp, opp.token_id)
+            };
+            let mut pending = self.pending_trades.lock().await;
+            let trade = PendingTrade {
+                token_id: opp.token_id.clone(),
+                condition_id: opp.condition_id.clone(),
+                token_type: opp.token_type.clone(),
+                order_id: response.order_id.clone(),
+                investment_amount,
+                units: limit_shares,
+                purchase_price: limit_price,
+                sell_price,
+                timestamp: std::time::Instant::now(),
+                market_timestamp: opp.period_timestamp,
+                sold: false,
+                confirmed_balance: Some(0.0),
+                buy_order_confirmed: false,
+                limit_sell_orders_placed: false,
+                no_sell: !place_sell_orders,
+                claim_on_closure: false,
+                sell_attempts: 0,
+                redemption_attempts: 0,
+                redemption_abandoned: false,
+            };
+            pending.insert(trade_key, trade);
+        }
+        Ok(responses)
+    }
+
+    /// In simulation mode: sync pending_trades so that any limit order that the simulation tracker
+    /// has marked filled (has a position) is reflected as buy_order_confirmed in pending_trades.
+    /// Call this after check_limit_orders so that the same snapshot sees the updated fill state.
+    pub async fn sync_pending_trades_from_simulation(&self) -> Result<()> {
+        if !self.simulation_mode {
+            return Ok(());
+        }
+        let Some(tracker) = &self.simulation_tracker else { return Ok(()); };
+        let to_check: Vec<(String, String)> = {
+            let pending = self.pending_trades.lock().await;
+            pending
+                .iter()
+                .filter(|(k, t)| k.contains("_limit") && !t.buy_order_confirmed)
+                .map(|(k, t)| (k.clone(), t.token_id.clone()))
+                .collect()
+        };
+        for (key, token_id) in to_check {
+            if tracker.has_position(&token_id).await {
+                let mut pending = self.pending_trades.lock().await;
+                if let Some(t) = pending.get_mut(&key) {
+                    t.buy_order_confirmed = true;
+                    t.confirmed_balance = Some(t.units);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1218,6 +1617,7 @@ impl Trader {
             
             // If balance increased, limit buy order filled
             if current_balance > initial_balance + 0.000001 { // Small threshold to account for rounding
+                let filled_amount = current_balance - initial_balance;
                 crate::log_println!("═══════════════════════════════════════════════════════════");
                 crate::log_println!("✅ LIMIT BUY ORDER FILLED");
                 crate::log_println!("═══════════════════════════════════════════════════════════");
@@ -1226,17 +1626,17 @@ impl Trader {
                 crate::log_println!("   Token ID: {}", trade.token_id);
                 crate::log_println!("   Initial Balance: {:.6} shares", initial_balance);
                 crate::log_println!("   Current Balance: {:.6} shares", current_balance);
-                crate::log_println!("   Filled Amount: {:.6} shares", current_balance - initial_balance);
+                crate::log_println!("   Filled Amount: {:.6} shares", filled_amount);
                 crate::log_println!("   Purchase Price: ${:.6}", trade.purchase_price);
                 crate::log_println!("   Target Sell Price: ${:.6}", trade.sell_price);
                 crate::log_println!("");
                 
-                // Update trade with confirmed balance
+                // Update trade: store total balance for future checks; store filled amount in units so same-size hedge uses order fill size not total wallet
                 {
                     let mut pending = self.pending_trades.lock().await;
                     if let Some(t) = pending.get_mut(key.as_str()) {
                         t.confirmed_balance = Some(current_balance);
-                        t.units = current_balance; // Update units to actual filled amount
+                        t.units = filled_amount; // Filled amount from this order (not total balance, so hedge same-size is correct)
                         t.buy_order_confirmed = true;
                     }
                 }
@@ -1244,6 +1644,15 @@ impl Trader {
                 // For no-sell mode, log confirmation only and skip sell placement
                 if trade.no_sell {
                     crate::log_println!("✅ No-sell mode: confirmation logged, no sell orders will be placed.");
+                    let mut pending = self.pending_trades.lock().await;
+                    if let Some(t) = pending.get_mut(key.as_str()) {
+                        t.limit_sell_orders_placed = true;
+                    }
+                    continue;
+                }
+                // Dual limit same-size: when dual_filled_limit_sell_enabled is Some(false), do not place limit sell for initial dual limit fills (non-reentry)
+                if key.contains("_limit") && !key.contains("reentry") && self.config.dual_filled_limit_sell_enabled == Some(false) {
+                    crate::log_println!("✅ Dual-filled limit sell disabled: confirmation logged, no sell orders will be placed.");
                     let mut pending = self.pending_trades.lock().await;
                     if let Some(t) = pending.get_mut(key.as_str()) {
                         t.limit_sell_orders_placed = true;
@@ -1421,6 +1830,7 @@ impl Trader {
             
             // If balance increased, limit buy order filled
             if current_balance > initial_balance + 0.000001 { // Small threshold to account for rounding
+                let filled_amount = current_balance - initial_balance;
                 crate::log_println!("═══════════════════════════════════════════════════════════");
                 crate::log_println!("✅ LIMIT BUY ORDER FILLED");
                 crate::log_println!("═══════════════════════════════════════════════════════════");
@@ -1429,19 +1839,19 @@ impl Trader {
                 crate::log_println!("   Token ID: {}", trade.token_id);
                 crate::log_println!("   Initial Balance: {:.6} shares", initial_balance);
                 crate::log_println!("   Current Balance: {:.6} shares", current_balance);
-                crate::log_println!("   Filled Amount: {:.6} shares", current_balance - initial_balance);
+                crate::log_println!("   Filled Amount: {:.6} shares", filled_amount);
                 crate::log_println!("   Purchase Price: ${:.6}", trade.purchase_price);
                 crate::log_println!("   Will place limit sell order:");
                 crate::log_println!("      - Sell at ${:.6} (profit target)", self.config.sell_price);
                 crate::log_println!("      - Stop-loss disabled for limit order version");
                 crate::log_println!("");
                 
-                // Update trade with confirmed balance
+                // Update trade: store total balance for future checks; store filled amount in units
                 {
                     let mut pending = self.pending_trades.lock().await;
                     if let Some(t) = pending.get_mut(key.as_str()) {
                         t.confirmed_balance = Some(current_balance);
-                        t.units = current_balance; // Update units to actual filled amount
+                        t.units = filled_amount; // Filled amount from this order
                         t.buy_order_confirmed = true;
                     }
                 }
@@ -1449,6 +1859,15 @@ impl Trader {
                 // For no-sell mode (dual limit bot), log confirmation only and skip sell placement
                 if trade.no_sell {
                     crate::log_println!("✅ No-sell mode: confirmation logged, no sell orders will be placed.");
+                    let mut pending = self.pending_trades.lock().await;
+                    if let Some(t) = pending.get_mut(key.as_str()) {
+                        t.limit_sell_orders_placed = true;
+                    }
+                    continue;
+                }
+                // Dual limit same-size: when dual_filled_limit_sell_enabled is Some(false), do not place limit sell for initial dual limit fills (non-reentry)
+                if key.contains("_limit") && !key.contains("reentry") && self.config.dual_filled_limit_sell_enabled == Some(false) {
+                    crate::log_println!("✅ Dual-filled limit sell disabled: confirmation logged, no sell orders will be placed.");
                     let mut pending = self.pending_trades.lock().await;
                     if let Some(t) = pending.get_mut(key.as_str()) {
                         t.limit_sell_orders_placed = true;
@@ -3441,12 +3860,12 @@ impl Trader {
         self.redeem_token_by_id_with_trade(&trade).await
     }
 
-    /// Reset for new period
-    pub async fn reset_period(&self, old_period: u64) {
-        let mut pending = self.pending_trades.lock().await;
-        // Remove trades from old period
-        pending.retain(|_, trade| trade.market_timestamp != old_period);
-        drop(pending);
+    /// Reset for new period (detector state is reset elsewhere).
+    /// We do NOT remove pending trades here: unsold/unredeemed positions from the previous
+    /// period must stay in pending_trades so check_market_closure can redeem them. Removing
+    /// them would cause the bot to never redeem winning tokens from the just-closed period.
+    pub async fn reset_period(&self, _old_period: u64) {
+        // No-op: keep all pending trades until sold or redemption_abandoned (cleanup_old_abandoned_trades).
     }
 
     /// Print summary of all trades (for testing/verification)
