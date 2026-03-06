@@ -227,15 +227,29 @@ async fn main() -> Result<()> {
     if num_tokens < 2 || num_tokens > 3 {
         anyhow::bail!("Market must have 2 or 3 outcome tokens, got {}", num_tokens);
     }
-    let token0_id = details.tokens[0].token_id.clone();
-    let token1_id = details.tokens[1].token_id.clone();
-    let out0 = &details.tokens[0].outcome;
-    let out1 = &details.tokens[1].outcome;
+    // Prefer outcome names from Gamma (e.g. "Over 220.5" / "Under 220.5") when present; else use CLOB token labels ("Over"/"Under")
+    let outcome_names: Vec<String> = if let Some(ref outcomes_json) = market.outcomes {
+        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(outcomes_json) {
+            if parsed.len() == num_tokens && parsed.iter().all(|s| !s.is_empty()) {
+                parsed
+            } else {
+                details.tokens.iter().map(|t| t.outcome.clone()).collect()
+            }
+        } else {
+            details.tokens.iter().map(|t| t.outcome.clone()).collect()
+        }
+    } else {
+        details.tokens.iter().map(|t| t.outcome.clone()).collect()
+    };
+    let out0 = outcome_names[0].as_str();
+    let out1 = outcome_names[1].as_str();
     let (token2_id, out2) = if num_tokens >= 3 {
-        (Some(details.tokens[2].token_id.clone()), details.tokens[2].outcome.as_str())
+        (Some(details.tokens[2].token_id.clone()), outcome_names[2].as_str())
     } else {
         (None, "")
     };
+    let token0_id = details.tokens[0].token_id.clone();
+    let token1_id = details.tokens[1].token_id.clone();
 
     let end_ts = parse_end_date_iso(&details.end_date_iso)
         .or_else(|| market.end_date_iso.as_deref().and_then(parse_end_date_iso))

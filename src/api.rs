@@ -317,34 +317,60 @@ impl PolymarketApi {
         Ok(all_markets)
     }
 
-    /// Get market by slug (e.g., "btc-updown-15m-1767726000")
-    /// The API returns an event object with a markets array
+    /// Get market by slug (e.g., "btc-updown-15m-1767726000" or "lol-fur-sen-2026-03-06")
+    /// The API returns an event object with a markets array. When the event has multiple
+    /// markets (e.g. esports: Match Winner, Game 1 Winner, Over/Under totals), we prefer
+    /// the "Match Winner" market so we trade the main match outcome, not an O/U or game-level market.
     pub async fn get_market_by_slug(&self, slug: &str) -> Result<Market> {
         let url = format!("{}/events/slug/{}", self.gamma_url, slug);
-        
+
         let response = self.client.get(&url).send().await
             .context(format!("Failed to fetch market by slug: {}", slug))?;
-        
+
         let status = response.status();
         if !status.is_success() {
             anyhow::bail!("Failed to fetch market by slug: {} (status: {})", slug, status);
         }
-        
+
         let json: Value = response.json().await
             .context("Failed to parse market response")?;
-        
-        // The response is an event object with a "markets" array
-        // Extract the first market from the markets array
-        if let Some(markets) = json.get("markets").and_then(|m| m.as_array()) {
-            if let Some(market_json) = markets.first() {
-                // Try to deserialize the market
-                if let Ok(market) = serde_json::from_value::<Market>(market_json.clone()) {
-                    return Ok(market);
-                }
+
+        let markets = json.get("markets").and_then(|m| m.as_array())
+            .context("Invalid market response format: no markets array found")?;
+
+        if markets.is_empty() {
+            anyhow::bail!("Event has no markets");
+        }
+
+        fn is_over_under_outcomes(outcomes_json: Option<&Value>) -> bool {
+            let s = match outcomes_json.and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => return false,
+            };
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(s) {
+                arr.len() == 2
+                    && arr[0].eq_ignore_ascii_case("Over")
+                    && arr[1].eq_ignore_ascii_case("Under")
+            } else {
+                false
             }
         }
-        
-        anyhow::bail!("Invalid market response format: no markets array found")
+
+        // 1) Prefer "Match Winner" (main match market)
+        let chosen = markets.iter().find(|m| {
+            m.get("groupItemTitle").and_then(|v| v.as_str())
+                .map(|t| t.eq_ignore_ascii_case("Match Winner"))
+                .unwrap_or(false)
+        });
+        // 2) Else prefer first market that is not Over/Under (e.g. team vs team)
+        let chosen = chosen.or_else(|| {
+            markets.iter().find(|m| !is_over_under_outcomes(m.get("outcomes")))
+        });
+        // 3) Else use first market
+        let market_json = chosen.or(markets.first()).unwrap();
+
+        serde_json::from_value::<Market>(market_json.clone())
+            .context("Failed to deserialize selected market")
     }
 
     /// Get order book for a specific token
