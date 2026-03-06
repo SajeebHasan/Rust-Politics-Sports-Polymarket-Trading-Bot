@@ -1,6 +1,8 @@
-# Polymarket Sports Trailing Bot
+# Polymarket Sports & Politics Trailing Bot
 
-A Rust bot for [Polymarket](https://polymarket.com) that trades **sports (binary) markets** by slug using a **trailing stop** strategy only.
+A Rust bot for [Polymarket](https://polymarket.com) that trades **sports and politics (binary) markets** by slug using a **trailing stop** strategy only.
+
+**Supported markets:** Any binary market on Polymarket—sports (e.g. game outcomes), politics (e.g. election results), or other event markets. You provide the market **slug**; the bot does the rest.
 
 **Behavior:**
 - You set a **slug** in config (e.g. the market’s event slug).
@@ -15,7 +17,7 @@ A Rust bot for [Polymarket](https://polymarket.com) that trades **sports (binary
 
 | Binary | Description |
 |--------|-------------|
-| `main_sports_trailing` | Sports trailing bot (default) — slug-based, trailing only |
+| `main_sports_trailing` | Sports & politics trailing bot (default) — slug-based, trailing only |
 
 ```bash
 # Build
@@ -46,7 +48,7 @@ cargo run --release -- --no-simulation
    - **polymarket:** `gamma_api_url`, `clob_api_url`, `api_key`, `api_secret`, `api_passphrase`, `private_key`
    - Optional: `proxy_wallet_address`, `signature_type` (1 = POLY_PROXY, 2 = GNOSIS_SAFE)
    - **trading:**  
-     - **`slug`** (required) — market slug, e.g. `"nfl-team-a-vs-team-b"`  
+     - **`slug`** (required) — market slug, e.g. `"nfl-team-a-vs-team-b"` (sports) or `"will-x-win-election"` (politics)  
      - **`continuous`** — `true` = keep trailing and buying both sides repeatedly until market ends; `false` = buy each side once per market  
      - `trailing_stop_point` (e.g. `0.03`)  
      - `trailing_shares` (e.g. `10`)  

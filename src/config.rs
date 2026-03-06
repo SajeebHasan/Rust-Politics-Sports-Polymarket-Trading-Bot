@@ -170,9 +170,9 @@ pub struct TradingConfig {
     pub trailing_stop_point: Option<f64>,
     /// Dual limit same-size 2-min hedge: trigger when unfilled price goes UP by this amount over lowest (current >= lowest + this), then buy at current ask. In config.json: "dual_limit_hedge_trailing_stop": 0.03
     pub dual_limit_hedge_trailing_stop: Option<f64>,
-    /// Sports trailing bot: market slug (e.g. "nfl-team-a-vs-team-b"). When set, bot trades this single market only.
+    /// Trailing bot: market slug (sports, politics, or any binary market). e.g. "nfl-team-a-vs-team-b" or "will-x-win-election". When set, bot trades this single market only.
     pub slug: Option<String>,
-    /// Sports trailing bot: when true, after buying both tokens, start again (trail and buy repeatedly until market ends). When false, buy each side once per market.
+    /// Trailing bot: when true, after buying both tokens, start again (trail and buy repeatedly until market ends). When false, buy each side once per market.
     pub continuous: bool,
     /// Trailing bot: exact number of shares to buy per token (first and second buy).
     pub trailing_shares: Option<f64>,

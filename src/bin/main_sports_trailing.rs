@@ -1,4 +1,4 @@
-// Sports trailing bot: trade a single market by slug. Trail the token whose price is going down first (buy when price >= lowest + trailing_stop), then trail and buy the opposite token. Option: once per market or continuous (repeat after both bought).
+// Trailing bot for sports, politics, and other binary markets: trade a single market by slug. Trail the token whose price is going down first (buy when price >= lowest + trailing_stop), then trail and buy the opposite token. Option: once per market or continuous (repeat after both bought).
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
         .slug
         .as_ref()
         .filter(|s| !s.is_empty())
-        .context("Config must set trading.slug (e.g. your sports market slug)")?;
+        .context("Config must set trading.slug (e.g. sports or politics market slug)")?;
 
     let continuous = config.trading.continuous;
     let trailing_stop = config.trading.trailing_stop_point.unwrap_or(0.03);
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| config.trading.fixed_trade_amount / 0.5);
     let check_interval_ms = config.trading.check_interval_ms;
 
-    eprintln!("🚀 Sports Trailing Bot — slug: {}", slug);
+    eprintln!("🚀 Sports & Politics Trailing Bot — slug: {}", slug);
     eprintln!(
         "Mode: {} | Continuous: {}",
         if is_simulation { "SIMULATION" } else { "LIVE" },
@@ -309,10 +309,10 @@ async fn main() -> Result<()> {
                         dual_limit_shares: Some(first_shares_val),
                     };
                     if let Err(e) = trader.execute_buy(&opp).await {
-                        warn!("Sports trailing second buy failed: {}", e);
+                                warn!("Trailing second buy failed: {}", e);
                     } else {
                         polymarket_trading_bot::log_println!(
-                            "📈 Sports trailing second buy: {} at ${:.4} x {:.6}",
+                            "📈 Trailing second buy: {} at ${:.4} x {:.6}",
                             if is_first_side { out0 } else { out1 },
                             opp_ask,
                             first_shares_val
@@ -414,7 +414,7 @@ async fn execute_first_buy(
     let mut g = state.lock().await;
     match result {
         Err(e) => {
-            warn!("Sports trailing first buy failed: {}", e);
+            warn!("Trailing first buy failed: {}", e);
             *g = SportsTrailingState::WaitingFirst {
                 low0: revert_low0,
                 high0: revert_high0,
@@ -424,7 +424,7 @@ async fn execute_first_buy(
         }
         Ok(()) => {
             polymarket_trading_bot::log_println!(
-                "📈 Sports trailing first buy: {} at ${:.4} x {:.6} (cost ${:.2})",
+                                "📈 Trailing first buy: {} at ${:.4} x {:.6} (cost ${:.2})",
                 if first_is_token0 { out0 } else { out1 },
                 buy_price,
                 units,
