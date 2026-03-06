@@ -54,3 +54,7 @@
 [2026-02-27T02:10:36Z] 📊 SIMULATION: Found 0 pending limit order(s) waiting for fills
 
 [2026-02-27T02:10:36Z] ⚠️  SIMULATION: No token IDs to fetch prices for
+[2026-03-06T08:14:06Z] ✅ SIMULATION: Market BUY filled - 1133987662436776 (Down), Price: $0.600000, Units: 10.000000, Investment: $6.00
+[2026-03-06T08:16:32Z] ✅ SIMULATION: Market BUY filled - 1133987662436776 (Down), Price: $0.630000, Units: 10.000000, Investment: $6.30
+[2026-03-06T08:16:56Z] ✅ SIMULATION: Market BUY filled - 9658510250825947 (Up), Price: $0.420000, Units: 10.000000, Investment: $4.20
+[2026-03-06T09:22:58Z] ✅ SIMULATION: Market BUY filled - 9658510250825947 (Up), Price: $0.470000, Units: 10.000000, Investment: $4.70
