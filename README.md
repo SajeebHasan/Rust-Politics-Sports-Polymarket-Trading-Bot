@@ -2,13 +2,13 @@
 
 A Rust bot for [Polymarket](https://polymarket.com) that trades **sports and politics (binary) markets** by slug using a **trailing stop** strategy only.
 
-**Supported markets:** Any binary market on Polymarket—sports (e.g. `nba-dal-orl-2026-03-05`), politics, or other event markets. You provide the market **slug**; the bot does the rest.
+**Supported markets:** Binary (2-outcome) and **3-outcome** markets on Polymarket—e.g. sports (`nba-dal-orl-2026-03-05`), soccer with Draw (`aus-ade-wel-2026-03-06`), politics. You provide the market **slug**; the bot does the rest. For 3-way (e.g. Team A / Team B / Draw), the bot trails all three; it buys first an outcome under 0.50, then trails and buys one of the two remaining.
 
 **Behavior:**
 - You set a **slug** in config (e.g. the market’s event slug).
-- The bot loads that single market and tracks both outcome tokens.
-- It trails the token whose price is moving down first: when price recovers (current ask ≥ lowest seen + trailing stop), it buys that token.
-- After the first buy, it trails the **opposite** token the same way and buys when that side triggers.
+- The bot loads that single market and tracks all outcome tokens (2 or 3).
+- **First leg:** It trails every outcome; it buys only one whose **price is under 0.50** when it triggers (ask ≥ lowest + trailing stop). For 3-way markets (e.g. Team A / Team B / Draw), only underdog(s) can trigger the first buy.
+- **Second leg:** It trails the remaining token(s)—the opposite (binary) or the two remaining (3-way)—and buys when one triggers.
 - You can run **once** (one pair of buys per market) or **continuous** (after both sides are bought, it resets and trails/buys again until the market ends).
 
 ---

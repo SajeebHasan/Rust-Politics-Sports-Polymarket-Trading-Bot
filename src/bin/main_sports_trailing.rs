@@ -466,6 +466,88 @@ async fn main() -> Result<()> {
                     continue;
                 }
             }
+            SportsTrailingState::WaitingFirst3 {
+                low0,
+                high0,
+                low1,
+                high1,
+                low2,
+                high2,
+            } => {
+                let old_high0 = *high0;
+                let old_high1 = *high1;
+                let old_high2 = *high2;
+                *low0 = (*low0).min(ask0);
+                *high0 = (*high0).max(ask0);
+                *low1 = (*low1).min(ask1);
+                *high1 = (*high1).max(ask1);
+                *low2 = (*low2).min(ask2);
+                *high2 = (*high2).max(ask2);
+
+                let trigger0 = *low0 + trailing_stop;
+                let trigger1 = *low1 + trailing_stop;
+                let trigger2 = *low2 + trailing_stop;
+
+                if ask0 > old_high0 {
+                    *low0 = ask0;
+                }
+                if ask1 > old_high1 {
+                    *low1 = ask1;
+                }
+                if ask2 > old_high2 {
+                    *low2 = ask2;
+                }
+
+                let buy0 = ask0 >= trigger0 && ask0 <= old_high0;
+                let buy1 = ask1 >= trigger1 && ask1 <= old_high1;
+                let buy2 = ask2 >= trigger2 && ask2 <= old_high2;
+
+                let token0_under = ask0 < 0.5;
+                let token1_under = ask1 < 0.5;
+                let token2_under = ask2 < 0.5;
+
+                let do_buy0 = buy0 && token0_under;
+                let do_buy1 = buy1 && token1_under;
+                let do_buy2 = buy2 && token2_under;
+
+                // Pick the cheapest triggering underdog.
+                let (first_index, price) = if do_buy0 && (!do_buy1 || ask0 <= ask1) && (!do_buy2 || ask0 <= ask2) {
+                    (0usize, ask0)
+                } else if do_buy1 && (!do_buy2 || ask1 <= ask2) {
+                    (1, ask1)
+                } else if do_buy2 {
+                    (2, ask2)
+                } else {
+                    (0, 0.0)
+                };
+
+                if do_buy0 || do_buy1 || do_buy2 {
+                    let p2 = p2_opt.as_ref().unwrap();
+                    drop(guard);
+                    execute_first_buy_3(
+                        state.clone(),
+                        trader.clone(),
+                        first_index,
+                        price,
+                        shares,
+                        &p0,
+                        &p1,
+                        p2,
+                        ask0,
+                        ask1,
+                        ask2,
+                        &condition_id,
+                        period_timestamp,
+                        effective_time_remaining,
+                        out0,
+                        out1,
+                        out2,
+                    )
+                    .await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
+                    continue;
+                }
+            }
             SportsTrailingState::FirstBought {
                 first_is_token0,
                 first_price,
@@ -528,20 +610,126 @@ async fn main() -> Result<()> {
                     continue;
                 }
             }
+            SportsTrailingState::FirstBought3 {
+                first_index,
+                first_price: _,
+                shares: first_shares,
+                rem1_low,
+                rem1_high,
+                rem2_low,
+                rem2_high,
+            } => {
+                let rem1_idx = (*first_index + 1) % 3;
+                let rem2_idx = (*first_index + 2) % 3;
+                let asks = [ask0, ask1, ask2];
+                let rem1_ask = asks[rem1_idx];
+                let rem2_ask = asks[rem2_idx];
+                let old_rem1_high = *rem1_high;
+                let old_rem2_high = *rem2_high;
+
+                *rem1_low = (*rem1_low).min(rem1_ask);
+                *rem1_high = (*rem1_high).max(rem1_ask);
+                *rem2_low = (*rem2_low).min(rem2_ask);
+                *rem2_high = (*rem2_high).max(rem2_ask);
+
+                if rem1_ask > old_rem1_high {
+                    *rem1_low = rem1_ask;
+                }
+                if rem2_ask > old_rem2_high {
+                    *rem2_low = rem2_ask;
+                }
+
+                let trigger1 = *rem1_low + trailing_stop;
+                let trigger2 = *rem2_low + trailing_stop;
+                let buy_rem1 = rem1_ask >= trigger1 && rem1_ask <= old_rem1_high;
+                let buy_rem2 = rem2_ask >= trigger2 && rem2_ask <= old_rem2_high;
+
+                if !buy_rem1 && !buy_rem2 {
+                    drop(guard);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
+                    continue;
+                }
+
+                let token_ids: [&str; 3] = [&token0_id, &token1_id, token2_id.as_ref().unwrap()];
+                let outcomes = [out0, out1, out2];
+                let (buy_which, opp_ask, opp_id, opp_outcome): (usize, f64, &str, &str) = if buy_rem1 && (!buy_rem2 || rem1_ask <= rem2_ask) {
+                    (rem1_idx, rem1_ask, token_ids[rem1_idx], outcomes[rem1_idx])
+                } else {
+                    (rem2_idx, rem2_ask, token_ids[rem2_idx], outcomes[rem2_idx])
+                };
+
+                let first_shares_val = *first_shares;
+                drop(guard);
+                let investment = first_shares_val * opp_ask;
+                let opp = BuyOpportunity {
+                    condition_id: condition_id.clone(),
+                    token_id: opp_id.to_string(),
+                    token_type: if buy_which == 0 {
+                        TokenType::BtcUp
+                    } else {
+                        TokenType::BtcDown
+                    },
+                    bid_price: opp_ask,
+                    period_timestamp,
+                    time_remaining_seconds: effective_time_remaining,
+                    time_elapsed_seconds: 0,
+                    use_market_order: true,
+                    investment_amount_override: Some(investment),
+                    is_individual_hedge: false,
+                    is_standard_hedge: false,
+                    dual_limit_shares: Some(first_shares_val),
+                };
+                if let Err(e) = trader.execute_buy(&opp).await {
+                    warn!("Trailing second buy (3-way) failed: {}", e);
+                } else {
+                    polymarket_trading_bot::log_println!(
+                        "📈 Trailing second buy: {} at ${:.4} x {:.6}",
+                        opp_outcome,
+                        opp_ask,
+                        first_shares_val
+                    );
+                    let mut g = state.lock().await;
+                    if continuous {
+                        *g = SportsTrailingState::WaitingFirst3 {
+                            low0: 1.0,
+                            high0: 0.0,
+                            low1: 1.0,
+                            high1: 0.0,
+                            low2: 1.0,
+                            high2: 0.0,
+                        };
+                    } else {
+                        *g = SportsTrailingState::Done;
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
+                continue;
+            }
             SportsTrailingState::Done => {
                 if !continuous {
                     drop(guard);
                     tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
                     continue;
                 }
-                *guard = SportsTrailingState::WaitingFirst {
-                    low0: ask0,
-                    high0: ask0,
-                    low1: ask1,
-                    high1: ask1,
-                };
+                if num_tokens == 3 {
+                    *guard = SportsTrailingState::WaitingFirst3 {
+                        low0: ask0,
+                        high0: ask0,
+                        low1: ask1,
+                        high1: ask1,
+                        low2: ask2,
+                        high2: ask2,
+                    };
+                } else {
+                    *guard = SportsTrailingState::WaitingFirst {
+                        low0: ask0,
+                        high0: ask0,
+                        low1: ask1,
+                        high1: ask1,
+                    };
+                }
             }
-            SportsTrailingState::FirstBuyPending { .. } => {}
+            SportsTrailingState::FirstBuyPending { .. } | SportsTrailingState::FirstBuyPending3 { .. } => {}
         }
         drop(guard);
         tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
@@ -630,6 +818,113 @@ async fn execute_first_buy(
                 first_price: buy_price,
                 shares: units,
                 opposite_lowest: opp_ask,
+            };
+        }
+    }
+}
+
+async fn execute_first_buy_3(
+    state: Arc<tokio::sync::Mutex<SportsTrailingState>>,
+    trader: Arc<Trader>,
+    first_index: usize,
+    buy_price: f64,
+    base_shares: f64,
+    p0: &polymarket_trading_bot::models::TokenPrice,
+    p1: &polymarket_trading_bot::models::TokenPrice,
+    p2: &polymarket_trading_bot::models::TokenPrice,
+    ask0: f64,
+    ask1: f64,
+    ask2: f64,
+    condition_id: &str,
+    period_timestamp: u64,
+    time_remaining_seconds: u64,
+    out0: &str,
+    out1: &str,
+    out2: &str,
+) {
+    let (units, investment) = first_buy_units_and_investment(base_shares, buy_price);
+    let tokens = [p0, p1, p2];
+    let outcomes = [out0, out1, out2];
+    let token_id = tokens[first_index].token_id.clone();
+    let token_type = if first_index == 0 {
+        TokenType::BtcUp
+    } else {
+        TokenType::BtcDown
+    };
+
+    let revert_low0 = ask0.min(1.0);
+    let revert_high0 = ask0.max(0.0);
+    let revert_low1 = ask1.min(1.0);
+    let revert_high1 = ask1.max(0.0);
+    let revert_low2 = ask2.min(1.0);
+    let revert_high2 = ask2.max(0.0);
+
+    let rem1_idx = (first_index + 1) % 3;
+    let rem2_idx = (first_index + 2) % 3;
+    let asks = [ask0, ask1, ask2];
+    let rem1_ask = asks[rem1_idx];
+    let rem2_ask = asks[rem2_idx];
+
+    {
+        let mut g = state.lock().await;
+        *g = SportsTrailingState::FirstBuyPending3 {
+            first_index,
+            first_price: buy_price,
+            shares: units,
+            revert_low0,
+            revert_high0,
+            revert_low1,
+            revert_high1,
+            revert_low2,
+            revert_high2,
+        };
+    }
+
+    let opp = BuyOpportunity {
+        condition_id: condition_id.to_string(),
+        token_id: token_id.clone(),
+        token_type,
+        bid_price: buy_price,
+        period_timestamp,
+        time_remaining_seconds,
+        time_elapsed_seconds: 0,
+        use_market_order: true,
+        investment_amount_override: Some(investment),
+        is_individual_hedge: false,
+        is_standard_hedge: false,
+        dual_limit_shares: Some(units),
+    };
+
+    let result = trader.execute_buy(&opp).await;
+    let mut g = state.lock().await;
+    match result {
+        Err(e) => {
+            warn!("Trailing first buy (3-way) failed: {}", e);
+            *g = SportsTrailingState::WaitingFirst3 {
+                low0: revert_low0,
+                high0: revert_high0,
+                low1: revert_low1,
+                high1: revert_high1,
+                low2: revert_low2,
+                high2: revert_high2,
+            };
+        }
+        Ok(()) => {
+            polymarket_trading_bot::log_println!(
+                "📈 Trailing first buy: {} at ${:.4} x {:.6} (cost ${:.2})",
+                outcomes[first_index],
+                buy_price,
+                units,
+                investment
+            );
+            *g = SportsTrailingState::FirstBought3 {
+                first_index,
+                first_price: buy_price,
+                shares: units,
+                rem1_low: rem1_ask,
+                rem1_high: rem1_ask,
+                rem2_low: rem2_ask,
+                rem2_high: rem2_ask,
             };
         }
     }
