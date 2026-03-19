@@ -1,0 +1,65 @@
+*{
+    margin: 0;
+    padding: 0;
+}
+.menu {
+	background: black;
+	height: 70px;
+	}
+
+.menu li {
+	list-style: none;
+    display: inline-block;
+   padding: 20px 15px
+       
+	}
+
+.menu li a {
+	color: white;
+	font-size: 20px;
+	font-weight: 700;
+	text-decoration: none;
+}
+
+.sub-menu-head {
+    position: relative;
+    display: inline-block;
+}
+
+.sub-menu {
+	position: absolute;
+	top: 71px;
+	background: black;
+    left: -77px;
+    display: none;
+	min-width: 160px;
+	z-index: 20;
+}
+.sub-menu li {
+	background: black;
+	
+}
+.sub-menu-head:hover .sub-menu{
+    display: block;
+}
+.menu li:hover{
+background: green;
+}
+/*header page css end*/
+/*galary page css start*/
+.galary-area{
+z-index: 2;
+}
+/*galary page css end*/
+/*footer page css start*/
+.footer-area{
+    
+   margin-top: 5%;
+}
+
+
+.img-resize img{
+    max-width: 105px;
+}
+/*footer page css end*/
+
